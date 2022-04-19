@@ -22,19 +22,36 @@ defmodule Goth.Server do
   end
 
   def fetch(name) do
-    GenServer.call(registry_name(name), :fetch)
+    case fetch_token(name) do
+      {:ok, token} -> {:ok, token}
+      {:error, _} -> GenServer.call(registry_name(name), :fetch)
+    end
   end
 
   @impl true
   def init(opts) when is_list(opts) do
+    {prefetch, opts} = opts |> Keyword.pop(:prefetch, :sync)
+
     opts =
       Keyword.update!(opts, :http_client, fn {module, opts} ->
         Goth.HTTPClient.init({module, opts})
       end)
 
+
     state = struct!(__MODULE__, opts)
 
-    {:ok, state, {:continue, :fetch_token}}
+    case prefetch do
+      :sync ->
+        prefetch_token(state)
+
+        {:ok, state}
+
+      :async ->
+        {:ok, state, {:continue, :fetch_token}}
+
+      false ->
+        {:ok, state}
+    end
   end
 
   @impl true
@@ -55,25 +72,7 @@ defmodule Goth.Server do
 
   @impl true
   def handle_call(:fetch, _from, state) do
-    {config, token} =
-      try do
-        get(state.name)
-      rescue
-        ArgumentError ->
-          {nil, nil}
-      end
-
-    reply =
-      cond do
-        token ->
-          {:ok, token}
-
-        config == nil ->
-          {:error, RuntimeError.exception("no token")}
-
-        true ->
-          Token.fetch(config)
-      end
+    reply = fetch_token(state.name)
 
     {:reply, reply, state}
   end
@@ -99,6 +98,41 @@ defmodule Goth.Server do
     put(state, token)
     time_in_seconds = max(token.expires - System.system_time(:second) - state.refresh_before, 0)
     Process.send_after(self(), :refresh, time_in_seconds * 1000)
+  end
+
+  defp fetch_token(name) do
+    {config, token} =
+      try do
+        {_config, _token} = get(name)
+      rescue
+        _e in [MatchError, ArgumentError] -> {nil, nil}
+      end
+
+    cond do
+      token ->
+        {:ok, token}
+
+      config == nil ->
+        {:error, RuntimeError.exception("no token")}
+
+      true ->
+        Token.fetch(config)
+    end
+  end
+
+  defp prefetch_token(state) do
+    # given calculating JWT for each request is expensive, we do it once
+    # on system boot to hopefully fill in the cache.
+    case Token.fetch(state) do
+      {:ok, token} ->
+        store_and_schedule_refresh(state, token)
+
+      {:error, _} ->
+        put(state, nil)
+        send(self(), :refresh)
+    end
+
+    {:noreply, state}
   end
 
   defp get(name) do

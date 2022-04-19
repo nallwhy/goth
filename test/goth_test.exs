@@ -1,6 +1,46 @@
 defmodule GothTest do
   use ExUnit.Case, async: true
 
+  describe "prefetch option" do
+    setup %{test: test} do
+      bypass = Bypass.open()
+
+      Bypass.expect(bypass, fn conn ->
+        body = ~s|{"access_token":"dummy","expires_in":3599,"token_type":"Bearer"}|
+        Plug.Conn.resp(conn, 200, body)
+      end)
+
+      config = [
+        name: test,
+        source: {:service_account, random_service_account_credentials(), url: "http://localhost:#{bypass.port}"}
+      ]
+
+      %{config: config}
+    end
+
+    test "with sync (default)", %{test: test, config: config} do
+      start_supervised!({Goth, config})
+
+      assert {:ok, _token} = Goth.fetch(test)
+    end
+
+    test "with async", %{test: test, config: config} do
+      config = config |> Keyword.put(:prefetch, :async)
+
+      start_supervised!({Goth, config})
+
+      assert {:ok, _token} = Goth.fetch(test)
+    end
+
+    test "with false", %{test: test, config: config} do
+      config = config |> Keyword.put(:prefetch, false)
+
+      start_supervised!({Goth, config})
+
+      assert {:ok, _token} = Goth.fetch(test)
+    end
+  end
+
   test "fetch/1", %{test: test} do
     now = System.system_time(:second)
     bypass = Bypass.open()
